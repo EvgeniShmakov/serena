@@ -12,7 +12,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Literal
 
-from serena.tools import SUCCESS_RESULT, EditedFileContext, Tool, ToolMarkerCanEdit, ToolMarkerOptional
+from serena.tools import SUCCESS_RESULT, EditedFileContext, EditingToolWithDiagnostics, Tool, ToolMarkerOptional
 from serena.util.file_system import scan_directory
 from serena.util.text_utils import ContentReplacer, search_files
 
@@ -24,8 +24,7 @@ class ReadFileTool(Tool):
 
     def apply(self, relative_path: str, start_line: int = 1, end_line: int | None = None, max_answer_chars: int = -1) -> str:
         """
-        Reads the given file or a chunk of it. Generally, symbolic operations
-        like find_symbol or find_referencing_symbols should be preferred if you know which symbols you are looking for.
+        Reads the given file or a chunk of it.
 
         :param relative_path: the relative path to the file to read
         :param start_line: the 1-based line number of the first line to be retrieved (inclusive).
@@ -49,7 +48,7 @@ class ReadFileTool(Tool):
         return self._limit_length(result, max_answer_chars)
 
 
-class CreateTextFileTool(Tool, ToolMarkerCanEdit):
+class CreateTextFileTool(EditingToolWithDiagnostics):
     """
     Creates/overwrites a file in the project directory.
     """
@@ -62,23 +61,27 @@ class CreateTextFileTool(Tool, ToolMarkerCanEdit):
         :param content: the (appropriately encoded) content to write to the file
         :return: a message indicating success or failure
         """
-        project_root = self.get_project_root()
-        abs_path = (Path(project_root) / relative_path).resolve()
-        will_overwrite_existing = abs_path.exists()
+        with self.DiagnosticsContext(self, relative_path) as diagnostics_context:
+            # validating the destination path
+            project_root = self.get_project_root()
+            abs_path = (Path(project_root) / relative_path).resolve()
+            will_overwrite_existing = abs_path.exists()
 
-        if will_overwrite_existing:
-            self.project.validate_relative_path(relative_path, require_not_ignored=True)
-        else:
-            assert abs_path.is_relative_to(self.get_project_root()), (
-                f"Cannot create file outside of the project directory, got {relative_path=}"
-            )
+            if will_overwrite_existing:
+                self.project.validate_relative_path(relative_path, require_not_ignored=True)
+            else:
+                assert abs_path.is_relative_to(self.get_project_root()), (
+                    f"Cannot create file outside of the project directory, got {relative_path=}"
+                )
 
-        abs_path.parent.mkdir(parents=True, exist_ok=True)
-        abs_path.write_text(content, encoding=self.project.project_config.encoding, newline=self.project.line_ending.newline_str)
-        answer = f"File created: {relative_path}."
-        if will_overwrite_existing:
-            answer += " Overwrote existing file."
-        return answer
+            # writing the file
+            abs_path.parent.mkdir(parents=True, exist_ok=True)
+            abs_path.write_text(content, encoding=self.project.project_config.encoding, newline=self.project.line_ending.newline_str)
+            answer = f"File created: {relative_path}."
+            if will_overwrite_existing:
+                answer += " Overwrote existing file."
+
+            return diagnostics_context.format_result(answer)
 
 
 class ListDirTool(Tool):
@@ -157,7 +160,7 @@ class FindFileTool(Tool):
         return result
 
 
-class ReplaceContentTool(Tool, ToolMarkerCanEdit):
+class ReplaceContentTool(EditingToolWithDiagnostics):
     """
     Replaces content in a file (optionally using regular expressions).
     """
@@ -213,16 +216,17 @@ class ReplaceContentTool(Tool, ToolMarkerCanEdit):
         Performs the replacement, with additional options not exposed in the tool.
         This function can be used internally by other tools.
         """
-        self.project.validate_relative_path(relative_path, require_not_ignored=require_not_ignored)
-        with EditedFileContext(relative_path, self.create_code_editor()) as context:
-            original_content = context.get_original_content()
-            replacer = ContentReplacer(mode=mode, allow_multiple_occurrences=allow_multiple_occurrences)
-            updated_content = replacer.replace(original_content, needle, repl)
-            context.set_updated_content(updated_content)
-        return SUCCESS_RESULT
+        with self.DiagnosticsContext(self, relative_path) as diagnostics_context:
+            self.project.validate_relative_path(relative_path, require_not_ignored=require_not_ignored)
+            with EditedFileContext(relative_path, self.create_code_editor()) as context:
+                original_content = context.get_original_content()
+                replacer = ContentReplacer(mode=mode, allow_multiple_occurrences=allow_multiple_occurrences)
+                updated_content = replacer.replace(original_content, needle, repl)
+                context.set_updated_content(updated_content)
+            return diagnostics_context.format_result(SUCCESS_RESULT)
 
 
-class DeleteLinesTool(Tool, ToolMarkerCanEdit, ToolMarkerOptional):
+class DeleteLinesTool(EditingToolWithDiagnostics, ToolMarkerOptional):
     """
     Deletes a range of lines within a file.
     """
@@ -242,12 +246,13 @@ class DeleteLinesTool(Tool, ToolMarkerCanEdit, ToolMarkerOptional):
         :param start_line: the 1-based line number of the first line to be deleted (inclusive)
         :param end_line: the 1-based line number of the last line to be deleted (inclusive)
         """
-        code_editor = self.create_code_editor()
-        code_editor.delete_lines(relative_path, start_line - 1, end_line - 1)
-        return SUCCESS_RESULT
+        with self.DiagnosticsContext(self, relative_path) as diagnostics_context:
+            code_editor = self.create_code_editor()
+            code_editor.delete_lines(relative_path, start_line - 1, end_line - 1)
+            return diagnostics_context.format_result(SUCCESS_RESULT)
 
 
-class ReplaceLinesTool(Tool, ToolMarkerCanEdit, ToolMarkerOptional):
+class ReplaceLinesTool(EditingToolWithDiagnostics, ToolMarkerOptional):
     """
     Replaces a range of lines within a file with new content.
     """
@@ -269,16 +274,19 @@ class ReplaceLinesTool(Tool, ToolMarkerCanEdit, ToolMarkerOptional):
         :param end_line: the 1-based line number of the last line to be replaced (inclusive)
         :param content: the content to insert
         """
+        # normalizing the replacement content
         if not content.endswith("\n"):
             content += "\n"
-        result = self.agent.get_tool(DeleteLinesTool).apply(relative_path, start_line, end_line)
-        if result != SUCCESS_RESULT:
-            return result
-        self.agent.get_tool(InsertAtLineTool).apply(relative_path, start_line, content)
-        return SUCCESS_RESULT
+
+        with self.DiagnosticsContext(self, relative_path) as diagnostics_context:
+            code_editor = self.create_code_editor()
+            code_editor.delete_lines(relative_path, start_line, end_line)
+            code_editor.insert_at_line(relative_path, start_line, content)
+
+            return diagnostics_context.format_result(SUCCESS_RESULT)
 
 
-class InsertAtLineTool(Tool, ToolMarkerCanEdit, ToolMarkerOptional):
+class InsertAtLineTool(EditingToolWithDiagnostics, ToolMarkerOptional):
     """
     Inserts content at a given line in a file.
     """
@@ -299,11 +307,15 @@ class InsertAtLineTool(Tool, ToolMarkerCanEdit, ToolMarkerOptional):
         :param line: the 1-based line number to insert content at (existing content at this line is pushed down)
         :param content: the content to be inserted
         """
+        # normalizing the inserted content
         if not content.endswith("\n"):
             content += "\n"
-        code_editor = self.create_code_editor()
-        code_editor.insert_at_line(relative_path, line - 1, content)
-        return SUCCESS_RESULT
+
+        with self.DiagnosticsContext(self, relative_path) as diagnostics_context:
+            code_editor = self.create_code_editor()
+            code_editor.insert_at_line(relative_path, line - 1, content)
+
+            return diagnostics_context.format_result(SUCCESS_RESULT)
 
 
 class SearchForPatternTool(Tool):
@@ -325,8 +337,7 @@ class SearchForPatternTool(Tool):
         """
         Offers a flexible search for arbitrary patterns in the codebase, including the
         possibility to search in non-code files.
-        Generally, symbolic operations like find_symbol or find_referencing_symbols
-        should be preferred if you know which symbols you are looking for.
+        Prefer symbolic operations if you know which symbols you are looking for!
 
         Pattern Matching Logic:
             For each match, the returned result will contain the full lines where the
@@ -337,17 +348,6 @@ class SearchForPatternTool(Tool):
             If a pattern matches multiple lines, all those lines will be part of the match.
             Be careful to not use greedy quantifiers unnecessarily, it is usually better to use non-greedy quantifiers like .*? to avoid
             matching too much content.
-
-        File Selection Logic:
-            The files in which the search is performed can be restricted very flexibly.
-            Using `restrict_search_to_code_files` is useful if you are only interested in code symbols (i.e., those
-            symbols that can be manipulated with symbolic tools like find_symbol).
-            You can also restrict the search to a specific file or directory,
-            and provide glob patterns to include or exclude certain files on top of that.
-            The globs are matched against relative file paths from the project root (not to the `relative_path` parameter that
-            is used to further restrict the search).
-            Smartly combining the various restrictions allows you to perform very targeted searches.
-
 
         :param substring_pattern: Regular expression for a substring pattern to search for
         :param context_lines_before: Number of lines of context to include before each match
@@ -368,14 +368,14 @@ class SearchForPatternTool(Tool):
             Don't adjust unless there is really no other way to get the content
             required for the task. Instead, if the output is too long, you should
             make a stricter query.
-        :param restrict_search_to_code_files: whether to restrict the search to only those files where
-            analyzed code symbols can be found. Otherwise, will search all non-ignored files.
-            Set this to True if your search is only meant to discover code that can be manipulated with symbolic tools.
-            For example, for finding classes or methods from a name pattern.
-            Setting to False is a better choice if you also want to search in non-code files, like in html or yaml files,
-            which is why it is the default.
-        :return: A mapping of file paths to lists of matched consecutive lines.
+        :param restrict_search_to_code_files: whether to restrict the search to source files.
+            Otherwise, will search all non-ignored files (default).
+        :return: A mapping from file paths to matched consecutive lines (0-based line numbers).
         """
+        relative_path = relative_path.strip()
+        if relative_path:
+            self.project.validate_relative_path(relative_path, require_not_ignored=True)
+
         abs_path = os.path.join(self.get_project_root(), relative_path)
         if not os.path.exists(abs_path):
             raise FileNotFoundError(f"Relative path {relative_path} does not exist.")
@@ -412,6 +412,7 @@ class SearchForPatternTool(Tool):
                 paths_include_glob=paths_include_glob,
                 paths_exclude_glob=paths_exclude_glob,
             )
+
         # group matches by file
         file_to_matches: dict[str, list[str]] = defaultdict(list)
         for match in matches:
