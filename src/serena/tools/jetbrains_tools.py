@@ -25,7 +25,7 @@ class JetBrainsFindSymbolTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional):
 
     def apply(
         self,
-        name_path_pattern: str,
+        name_path: str,
         depth: int = 0,
         relative_path: str | None = None,
         include_body: bool = False,
@@ -53,7 +53,7 @@ class JetBrainsFindSymbolTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional):
          * an absolute name path "/class/method" (absolute name path), which requires an exact match of the full name path within the source file.
         Append an index `[i]` to match a specific overload only, e.g. "MyClass/my_method[1]".
 
-        :param name_path_pattern: the name path matching pattern (see above)
+        :param name_path: the name path matching pattern (see above)
         :param depth: depth up to which descendants shall be retrieved (e.g. use 1 to also retrieve immediate children;
             for the case where the symbol is a class, this will return its methods).
             Ignored if `include_body=True`. Default 0.
@@ -73,7 +73,7 @@ class JetBrainsFindSymbolTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional):
         if include_body:
             depth = 0  # ignore user-specified depth if body is requested
 
-        name_path_pattern = self._sanitize_input_param(name_path_pattern)
+        name_path = self._sanitize_input_param(name_path)
 
         if relative_path:
             relative_path = self._sanitize_input_param(relative_path)
@@ -96,7 +96,7 @@ class JetBrainsFindSymbolTool(Tool, ToolMarkerSymbolicRead, ToolMarkerOptional):
                     include_documentation = False
                     include_quick_info = True
             symbol_collection_response = client.find_symbol(
-                name_path=name_path_pattern,
+                name_path=name_path,
                 relative_path=relative_path,
                 depth=depth,
                 include_body=include_body,

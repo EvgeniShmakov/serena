@@ -106,12 +106,12 @@ class MatchedConsecutiveLines:
         text_lines: list[TextLine] = []
         # before the line
         for lineno in range(start_lineno, line):
-            text_lines.append(TextLine(line_number=lineno, line_content=line_contents[lineno], match_type=LineType.BEFORE_MATCH))
+            text_lines.append(TextLine(line_number=lineno + 1, line_content=line_contents[lineno], match_type=LineType.BEFORE_MATCH))
         # the line
-        text_lines.append(TextLine(line_number=line, line_content=line_contents[line], match_type=LineType.MATCH))
+        text_lines.append(TextLine(line_number=line + 1, line_content=line_contents[line], match_type=LineType.MATCH))
         # after the line
         for lineno in range(line + 1, end_lineno + 1):
-            text_lines.append(TextLine(line_number=lineno, line_content=line_contents[lineno], match_type=LineType.AFTER_MATCH))
+            text_lines.append(TextLine(line_number=lineno + 1, line_content=line_contents[lineno], match_type=LineType.AFTER_MATCH))
 
         return cls(lines=text_lines, source_file_path=source_file_path)
 

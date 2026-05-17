@@ -52,6 +52,8 @@ class LanguageServerSymbolLocation:
         result = asdict(self)
         if not include_relative_path:
             result.pop("relative_path", None)
+        if result.get("line") is not None:
+            result["line"] = result["line"] + 1
         return result
 
     def has_position_in_file(self) -> bool:
@@ -489,7 +491,10 @@ class LanguageServerSymbol(Symbol, ToStringMixin):
 
         if body_location:
             body_start_line, body_end_line = self.get_body_line_numbers()
-            result["body_location"] = {"start_line": body_start_line, "end_line": body_end_line}
+            result["body_location"] = {
+                "start_line": body_start_line + 1 if body_start_line is not None else None,
+                "end_line": body_end_line + 1 if body_end_line is not None else None,
+            }
 
         if body:
             result["body"] = self.body

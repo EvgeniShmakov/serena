@@ -22,14 +22,14 @@ class ReadFileTool(Tool):
     Reads a file within the project directory.
     """
 
-    def apply(self, relative_path: str, start_line: int = 0, end_line: int | None = None, max_answer_chars: int = -1) -> str:
+    def apply(self, relative_path: str, start_line: int = 1, end_line: int | None = None, max_answer_chars: int = -1) -> str:
         """
         Reads the given file or a chunk of it. Generally, symbolic operations
         like find_symbol or find_referencing_symbols should be preferred if you know which symbols you are looking for.
 
         :param relative_path: the relative path to the file to read
-        :param start_line: the 0-based index of the first line to be retrieved.
-        :param end_line: the 0-based index of the last line to be retrieved (inclusive). If None, read until the end of the file.
+        :param start_line: the 1-based line number of the first line to be retrieved (inclusive).
+        :param end_line: the 1-based line number of the last line to be retrieved (inclusive). If None, read until the end of the file.
         :param max_answer_chars: if the file (chunk) is longer than this number of characters,
             no content will be returned. Don't adjust unless there is really no other way to get the content
             required for the task.
@@ -39,10 +39,11 @@ class ReadFileTool(Tool):
 
         result = self.project.read_file(relative_path)
         result_lines = result.splitlines()
+        start_idx = max(0, start_line - 1)
         if end_line is None:
-            result_lines = result_lines[start_line:]
+            result_lines = result_lines[start_idx:]
         else:
-            result_lines = result_lines[start_line : end_line + 1]
+            result_lines = result_lines[start_idx:end_line]
         result = "\n".join(result_lines)
 
         return self._limit_length(result, max_answer_chars)
@@ -238,11 +239,11 @@ class DeleteLinesTool(Tool, ToolMarkerCanEdit, ToolMarkerOptional):
         of the operation.
 
         :param relative_path: the relative path to the file
-        :param start_line: the 0-based index of the first line to be deleted
-        :param end_line: the 0-based index of the last line to be deleted
+        :param start_line: the 1-based line number of the first line to be deleted (inclusive)
+        :param end_line: the 1-based line number of the last line to be deleted (inclusive)
         """
         code_editor = self.create_code_editor()
-        code_editor.delete_lines(relative_path, start_line, end_line)
+        code_editor.delete_lines(relative_path, start_line - 1, end_line - 1)
         return SUCCESS_RESULT
 
 
@@ -264,8 +265,8 @@ class ReplaceLinesTool(Tool, ToolMarkerCanEdit, ToolMarkerOptional):
         of the operation.
 
         :param relative_path: the relative path to the file
-        :param start_line: the 0-based index of the first line to be deleted
-        :param end_line: the 0-based index of the last line to be deleted
+        :param start_line: the 1-based line number of the first line to be replaced (inclusive)
+        :param end_line: the 1-based line number of the last line to be replaced (inclusive)
         :param content: the content to insert
         """
         if not content.endswith("\n"):
@@ -295,13 +296,13 @@ class InsertAtLineTool(Tool, ToolMarkerCanEdit, ToolMarkerOptional):
         However, this can also be useful for small targeted edits of the body of a longer symbol (without replacing the entire body).
 
         :param relative_path: the relative path to the file
-        :param line: the 0-based index of the line to insert content at
+        :param line: the 1-based line number to insert content at (existing content at this line is pushed down)
         :param content: the content to be inserted
         """
         if not content.endswith("\n"):
             content += "\n"
         code_editor = self.create_code_editor()
-        code_editor.insert_at_line(relative_path, line, content)
+        code_editor.insert_at_line(relative_path, line - 1, content)
         return SUCCESS_RESULT
 
 

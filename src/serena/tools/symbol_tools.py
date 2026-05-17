@@ -131,7 +131,7 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead):
     # noinspection PyDefaultArgument
     def apply(
         self,
-        name_path_pattern: str,
+        name_path: str,
         depth: int = 0,
         relative_path: str = "",
         include_body: bool = False,
@@ -159,7 +159,7 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead):
          * an absolute name path "/class/method" (absolute name path), which requires an exact match of the full name path within the source file.
         Append an index `[i]` to match a specific overload only, e.g. "MyClass/my_method[1]".
 
-        :param name_path_pattern: the name path matching pattern (see above)
+        :param name_path: the name path matching pattern (see above)
         :param depth: depth up to which descendants shall be retrieved (e.g. use 1 to also retrieve immediate children;
             for the case where the symbol is a class, this will return its methods).
             Ignored if `include_body=True`. Default 0.
@@ -191,7 +191,7 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead):
         parsed_exclude_kinds: Sequence[SymbolKind] | None = [SymbolKind(k) for k in exclude_kinds] if exclude_kinds else None
         symbol_retriever = self.create_language_server_symbol_retriever()
         symbols = symbol_retriever.find(
-            name_path_pattern,
+            name_path,
             include_kinds=parsed_include_kinds,
             exclude_kinds=parsed_exclude_kinds,
             substring_matching=substring_matching,
@@ -299,7 +299,7 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
                     "name_path": d.get("name_path"),
                     "kind": d.get("kind"),
                     "relative_path": d.get("relative_path"),
-                    "reference_line": ref.line,
+                    "reference_line": ref.line + 1,
                 }
             )
 
@@ -437,27 +437,27 @@ class RenameSymbolTool(Tool, ToolMarkerSymbolicEdit):
 class SafeDeleteSymbol(Tool, ToolMarkerSymbolicEdit):
     def apply(
         self,
-        name_path_pattern: str,
+        name_path: str,
         relative_path: str,
     ) -> str:
         """
         Deletes the symbol if it is safe to do so (i.e., if there are no references to it)
         or returns a list of references to it.
 
-        :param name_path_pattern: name path of the symbol to delete (definitions in the `find_symbol` tool apply)
+        :param name_path: name path of the symbol to delete (definitions in the `find_symbol` tool apply)
         :param relative_path: the relative path to the file containing the symbol to delete
         """
         ls_symbol_retriever = self.create_language_server_symbol_retriever()
-        symbol = ls_symbol_retriever.find_unique(name_path_pattern, substring_matching=False, within_relative_path=relative_path)
+        symbol = ls_symbol_retriever.find_unique(name_path, substring_matching=False, within_relative_path=relative_path)
         symbol_rel_path = symbol.relative_path
-        assert symbol_rel_path is not None, f"Symbol {name_path_pattern} has no relative path, this is likely a bug."
-        assert symbol_rel_path == relative_path, f"Symbol {name_path_pattern} is not in the expected relative path {relative_path}."
+        assert symbol_rel_path is not None, f"Symbol {name_path} has no relative path, this is likely a bug."
+        assert symbol_rel_path == relative_path, f"Symbol {name_path} is not in the expected relative path {relative_path}."
         symbol_name_path = symbol.get_name_path()
 
         symbol_line = symbol.line
         symbol_col = symbol.column
         assert symbol_line is not None and symbol_col is not None, (
-            f"Symbol {name_path_pattern} has no identifier position, this is likely a bug."
+            f"Symbol {name_path} has no identifier position, this is likely a bug."
         )
         lang_server = ls_symbol_retriever.get_language_server(symbol_rel_path)
         references_locations = lang_server.request_references(symbol_rel_path, symbol_line, symbol_col)
@@ -467,7 +467,7 @@ class SafeDeleteSymbol(Tool, ToolMarkerSymbolicEdit):
                 ref_relative_path = ref_loc.get("relativePath")
                 if ref_relative_path is None:
                     continue
-                file_to_lines[ref_relative_path].append(ref_loc["range"]["start"]["line"])
+                file_to_lines[ref_relative_path].append(ref_loc["range"]["start"]["line"] + 1)
         if file_to_lines:
             return f"Cannot delete, the symbol {symbol_name_path} is referenced in: {self._to_json(file_to_lines)}"
         code_editor = self.create_ls_code_editor()
