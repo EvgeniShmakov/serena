@@ -575,7 +575,6 @@ class SolidLanguageServer(ABC):
         self._ignore_spec = pathspec.PathSpec.from_lines(pathspec.patterns.GitWildMatchPattern, processed_patterns)
 
         self._has_waited_for_cross_file_references = False
-        self._has_seen_nonempty_references = False
 
         # resolving additional workspace folders
         self._additional_workspace_abs_paths: list[str] = []
@@ -1655,39 +1654,14 @@ class SolidLanguageServer(ABC):
         to find references to the symbol at the given line and column in the given file. Wait for the response and return the result.
         Filters out references located in ignored directories.
 
-        Workaround for slow-to-index language servers (e.g. typescript-language-server, vtsls):
-        if this is the first reference query in the session and the result is empty, the LS may still
-        be indexing. Retry with backoff until we see a non-empty result. Once any non-empty result has
-        been observed, the flag latches and empty truly means empty (no further retries).
-
         :param relative_file_path: The relative path of the file that has the symbol for which references should be looked up
         :param line: The line number of the symbol
         :param column: The column number of the symbol
 
         :return: A list of locations where the symbol is referenced (excluding ignored directories)
         """
-        result = self.ReferencesLocationRequest(self, relative_file_path, line, column).execute()
-
-        if result:
-            self._has_seen_nonempty_references = True
-            return result
-
-        if self._has_seen_nonempty_references:
-            return result
-
-        # Cold start: LS may still be indexing the workspace. Retry with backoff.
-        for additional_wait in (3, 5, 10):
-            log.debug(
-                "request_references returned empty; LS may still be indexing. Waiting %ds and retrying.",
-                additional_wait,
-            )
-            sleep(additional_wait)
-            result = self.ReferencesLocationRequest(self, relative_file_path, line, column).execute()
-            if result:
-                self._has_seen_nonempty_references = True
-                return result
-
-        return result
+        request = self.ReferencesLocationRequest(self, relative_file_path, line, column)
+        return request.execute()
 
     def retrieve_full_file_content(self, file_path: str) -> str:
         """

@@ -2,18 +2,20 @@
 Provides TypeScript specific instantiation of the LanguageServer class. Contains various configurations and settings specific to TypeScript.
 """
 
+import json
 import logging
 import os
 import pathlib
 import shutil
 import threading
+from collections.abc import Hashable
 from typing import Any, cast
 
 from overrides import override
 from sensai.util.logging import LogTime
 
 from solidlsp import ls_types
-from solidlsp.ls import DocumentSymbols, LSPFileBuffer, LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer, SymbolBodyFactory
+from solidlsp.ls import LanguageServerDependencyProvider, LanguageServerDependencyProviderSinglePath, SolidLanguageServer
 from solidlsp.ls_config import LanguageServerConfig
 from solidlsp.ls_utils import PlatformId, PlatformUtils
 from solidlsp.lsp_protocol_handler.lsp_types import InitializeParams
@@ -82,11 +84,13 @@ class TypeScriptLanguageServer(SolidLanguageServer):
     # Safety timeout for $/progress-based indexing wait. Normally the event fires
     # well within this window; the timeout is only hit if the server never sends progress.
     INDEXING_PROGRESS_TIMEOUT = 15.0 if os.name == "nt" else 10.0
+    PROJECT_LOADING_TIMEOUT = 60.0
 
     def __init__(self, config: LanguageServerConfig, repository_root_path: str, solidlsp_settings: SolidLSPSettings):
         """
         Creates a TypeScriptLanguageServer instance. This class is not meant to be instantiated directly. Use LanguageServer.create() instead.
         """
+        self._workspace_typescript_version = self._read_workspace_typescript_version(repository_root_path)
         super().__init__(
             config,
             repository_root_path,
@@ -460,97 +464,46 @@ class TypeScriptLanguageServer(SolidLanguageServer):
         return 2
 
     @override
+    def _wait_for_cross_file_references_if_needed(self) -> None:
+        if self._has_waited_for_cross_file_references:
+            return
+        # tsserver loads the project after the first didOpen; references stay partial until that progress ends.
+        super()._wait_for_cross_file_references_if_needed()
+        if not self.wait_for_indexing(timeout=self.PROJECT_LOADING_TIMEOUT):
+            log.warning("TypeScript project loading did not finish within %.0fs; results may be incomplete", self.PROJECT_LOADING_TIMEOUT)
+
+    @override
     def _get_preferred_definition(self, definitions: list[ls_types.Location]) -> ls_types.Location:
         return prefer_non_node_modules_definition(definitions)
 
     @override
-    def request_document_symbols(self, relative_file_path: str, file_buffer: LSPFileBuffer | None = None) -> DocumentSymbols:
-        """
-        Override to fix truncated symbol ranges in TSX/JSX files.
+    def _document_symbols_cache_fingerprint(self) -> Hashable:
+        # Bump when symbol output changes; 2 = .tsx sent as typescriptreact (37c837ff).
+        symbol_output_version = 2
+        return (
+            symbol_output_version,
+            self._custom_settings.get("typescript_version", DEFAULT_TYPESCRIPT_VERSION),
+            self._custom_settings.get("typescript_language_server_version", DEFAULT_TYPESCRIPT_LANGUAGE_SERVER_VERSION),
+            self._custom_settings.get("ls_path"),
+            self._workspace_typescript_version,
+        )
 
-        The LSP documentSymbol response sometimes has incorrect ranges for functions
-        containing JSX with complex attribute expressions. The range.end gets set to
-        the last named child symbol instead of the actual function closing brace.
-
-        Fix: after building the symbol tree, validate each Function symbol's range
-        against the file content and extend it to the matching closing brace if truncated.
-        """
-        document_symbols = super().request_document_symbols(relative_file_path, file_buffer)
-
-        if not relative_file_path.endswith((".tsx", ".jsx")):
-            return document_symbols
-
-        self._fix_truncated_ranges(document_symbols, relative_file_path)
-        return document_symbols
-
-    def _fix_truncated_ranges(self, document_symbols: DocumentSymbols, relative_file_path: str) -> None:
-        """
-        For each Function/Method symbol in a TSX/JSX file, verify that the range
-        actually ends at the function's closing brace. If not, scan forward to find it.
-        """
-        absolute_path = os.path.join(self.repository_root_path, relative_file_path)
-        try:
-            with open(absolute_path, encoding="utf-8") as f:
-                lines = f.readlines()
-        except (OSError, UnicodeDecodeError):
-            return
-
-        FUNCTION_KIND = 12  # SymbolKind.Function
-        METHOD_KIND = 6     # SymbolKind.Method
-
-        fixed_any = False
-        for symbol in document_symbols.iter_symbols():
-            kind = symbol.get("kind")
-            if kind not in (FUNCTION_KIND, METHOD_KIND):
+    @staticmethod
+    def _read_workspace_typescript_version(repository_root_path: str) -> str | None:
+        """Version of the TypeScript that Node resolution finds for the workspace, if any."""
+        project_root = pathlib.Path(repository_root_path).resolve()
+        for directory in (project_root, *project_root.parents):
+            package_json = directory / "node_modules" / "typescript" / "package.json"
+            if not package_json.is_file():
                 continue
+            try:
+                package_data = json.loads(package_json.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None
 
-            sym_range = symbol.get("location", {}).get("range") or symbol.get("range")
-            if not sym_range:
-                continue
+            if not isinstance(package_data, dict):
+                return None
+            version = package_data.get("version")
+            return version if isinstance(version, str) else None
 
-            end_line = sym_range["end"]["line"]
-            start_col = sym_range["start"]["character"]  # indentation level of function declaration
-
-            # Check if the current end line has a standalone closing brace at the function's indent level
-            if end_line < len(lines):
-                end_indent = len(lines[end_line]) - len(lines[end_line].lstrip())
-                if end_indent == start_col and lines[end_line].strip() == "}":
-                    continue  # Range looks correct
-
-            # Range is truncated — find the closing `}` at the function's indentation level
-            # by scanning forward from the current end
-            fixed_end = None
-            for i in range(end_line + 1, len(lines)):
-                stripped = lines[i].rstrip()
-                if not stripped:
-                    continue
-                indent = len(lines[i]) - len(lines[i].lstrip())
-                if indent == start_col and stripped == "}":
-                    fixed_end = i
-                    break
-                # Don't scan too far — limit to 50 lines past current end
-                if i - end_line > 50:
-                    break
-
-            if fixed_end is not None and fixed_end > end_line:
-                log.debug(
-                    "Fixed truncated range for '%s': end_line %d -> %d in %s",
-                    symbol.get("name", "?"),
-                    end_line,
-                    fixed_end,
-                    relative_file_path,
-                )
-                sym_range["end"]["line"] = fixed_end
-                sym_range["end"]["character"] = len(lines[fixed_end].rstrip())
-                fixed_any = True
-
-        if fixed_any:
-            # Recreate bodies for all symbols with corrected ranges.
-            # Must delete existing SymbolBody first — SymbolBodyFactory.create_symbol_body()
-            # has an early return that reuses the existing body if present, which would
-            # still have the old (truncated) end_line baked in.
-            with self._open_file_context(relative_file_path, open_in_ls=False) as fd:
-                body_factory = SymbolBodyFactory(fd)
-                for symbol in document_symbols.iter_symbols():
-                    symbol.pop("body", None)
-                    symbol["body"] = self.create_symbol_body(symbol, factory=body_factory)
+        return None

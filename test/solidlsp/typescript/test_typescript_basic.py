@@ -1,11 +1,15 @@
 import os
+import shutil
+import threading
 
 import pytest
 
 from solidlsp import SolidLanguageServer
+from solidlsp.language_servers.typescript_language_server import TypeScriptLanguageServer
 from solidlsp.ls_config import Language
 from solidlsp.ls_utils import SymbolUtils
-from test.conftest import find_identifier_position, get_repo_path, language_has_verified_implementation_support
+from solidlsp.util.cache import save_cache
+from test.conftest import find_identifier_position, get_repo_path, language_has_verified_implementation_support, start_ls_context
 from test.solidlsp.conftest import format_symbol_for_assert, has_malformed_name, request_all_symbols
 
 
@@ -33,6 +37,46 @@ class TestTypescriptLanguageServer:
         assert any("index.ts" in ref.get("relativePath", "") for ref in refs), (
             "index.ts should reference helperFunction (tried all positions in selectionRange)"
         )
+
+    @pytest.mark.parametrize("language_server", [Language.TYPESCRIPT], indirect=True)
+    def test_cross_file_wait_blocks_until_project_loading_ends(
+        self,
+        language_server: SolidLanguageServer,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        assert isinstance(language_server, TypeScriptLanguageServer)
+        monkeypatch.setattr(language_server, "_get_wait_time_for_cross_file_referencing", lambda: 0)
+        language_server._has_waited_for_cross_file_references = False
+        language_server.expect_indexing()
+
+        finished = threading.Event()
+        errors: list[BaseException] = []
+
+        def invoke_wait() -> None:
+            try:
+                language_server._wait_for_cross_file_references_if_needed()
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                finished.set()
+
+        waiter = threading.Thread(target=invoke_wait)
+        waiter.start()
+        assert not finished.wait(timeout=0.05), "references were allowed before project loading ended"
+
+        language_server._indexing_complete.set()
+        assert finished.wait(timeout=1.0), "wait did not finish after project loading ended"
+        waiter.join()
+        assert not errors
+
+        # One-shot: a later progress operation that never ends must not stall every request.
+        def unexpected_wait_for_indexing(timeout: float) -> bool:
+            raise AssertionError(f"repeated indexing wait with timeout={timeout}")
+
+        monkeypatch.setattr(language_server, "wait_for_indexing", unexpected_wait_for_indexing)
+        language_server.expect_indexing()
+        language_server._wait_for_cross_file_references_if_needed()
+        language_server._indexing_complete.set()
 
     if language_has_verified_implementation_support(Language.TYPESCRIPT):
 
@@ -91,6 +135,27 @@ class TestTypescriptLanguageServer:
         assert any(s.get("name") == "trailingHelper" for s in roots), (
             "trailingHelper missing from jsx_component.tsx root symbols; tsserver likely stopped parsing at the first JSX expression."
         )
+
+    def test_legacy_symbol_cache_versions_are_rejected(self, tmp_path) -> None:
+        repo_path = tmp_path / "test_repo"
+        shutil.copytree(get_repo_path(Language.TYPESCRIPT), repo_path)
+
+        cache_dir = repo_path / ".serena" / "cache" / "typescript"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        save_cache(
+            str(cache_dir / TypeScriptLanguageServer.RAW_DOCUMENT_SYMBOL_CACHE_FILENAME),
+            (1, 1),
+            {"sentinel.ts": ("unchanged-hash", ["stale raw symbols"])},
+        )
+        save_cache(
+            str(cache_dir / TypeScriptLanguageServer.DOCUMENT_SYMBOL_CACHE_FILENAME),
+            TypeScriptLanguageServer.DOCUMENT_SYMBOL_CACHE_VERSION,
+            {"sentinel.ts": ("unchanged-hash", "stale document symbols")},
+        )
+
+        with start_ls_context(Language.TYPESCRIPT, repo_path=str(repo_path)) as language_server:
+            assert language_server._raw_document_symbols_cache == {}
+            assert language_server._document_symbols_cache == {}
 
     @pytest.mark.parametrize("language_server", [Language.TYPESCRIPT], indirect=True)
     def test_bare_symbol_names(self, language_server) -> None:
